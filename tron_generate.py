@@ -1,6 +1,4 @@
-from threading import Event
-from pathlib import Path
-from bip_utils.bip.bip44_base.bip44_base import Bip44Base
+from typing import TypedDict, Protocol
 from bip_utils.bip.bip44_base.bip44_base import Bip44Base
 from bip_utils.utils.mnemonic.mnemonic import Mnemonic
 import re
@@ -16,14 +14,34 @@ from bip_utils import (
     Bip44Changes,
 )
 
-config = {
+class Config(TypedDict):
+    num_processes: int
+    show_log: bool
+    log_count: int
+    is_included: bool
+    keyword_included: str
+    case_sensitive: bool
+    use_leet: bool
+    start_with: str | None
+    end_with: str | None
+    is_simetric: bool
+    simetric_deep: int
+    stop_on_found: bool
+
+
+class StopEvent(Protocol):
+    def is_set(self) -> bool: ...
+    def set(self) -> None: ...
+
+
+config: Config = {
     "num_processes": max(1, multiprocessing.cpu_count() - 1),  # Process count
     "show_log": True,  # Show progress or not
     "log_count": 10000,  # Show progress every N generations
     "is_included": True,  # Search for inclusion or not
-    "keyword_included": "BadBoy",  # Keyword for search inclusion
-    "register_accuracy": True,  # Register accuracy ! Dont work if "use_leet" is True
-    "use_leet": True,  # Use leet or not
+    "keyword_included": "Bad",  # Keyword for search inclusion
+    "case_sensitive": True,  # Register accuracy ! Dont work if "use_leet" is True
+    "use_leet": False,  # Use leet or not
     "start_with": None,  # Start of address all addresses start with "T"
     "end_with": None,  # End of address
     "is_simetric": False,  # Symmetric matching or not
@@ -56,7 +74,7 @@ LEET_MAP: dict[str, str] = {
 
 
 def has_palindrome_of_depth(s: str, depth: int, case_sensitive: bool = True) -> bool:
-    if not config["register_accuracy"]:
+    if not case_sensitive:
         s = s.lower()
     n = len(s)
 
@@ -81,7 +99,7 @@ def has_palindrome_of_depth(s: str, depth: int, case_sensitive: bool = True) -> 
     return False
 
 
-def iterate(process_id, stop_event) -> dict[str, str] | None:
+def iterate(process_id: int, stop_event: StopEvent) -> dict[str, str] | None:
     i = 0
     while not stop_event.is_set():
         i += 1
@@ -99,7 +117,7 @@ def iterate(process_id, stop_event) -> dict[str, str] | None:
         )
 
         address = acct.PublicKey().ToAddress()  # TRON Base58 address (starts with 'T')
-        if find_possible_addresses(address):
+        if address_matches_filters(address):
             return {
                 "address": address,
                 "seed_phrase": str(mnemonic),
@@ -110,72 +128,78 @@ def iterate(process_id, stop_event) -> dict[str, str] | None:
     return None
 
 
-def log_progress(process_id, attempts):
-    """Logging progress of attempts every 5000 attempts."""
-    if config["show_log"] and attempts % config["log_count"] == 0:
+def log_progress(process_id: int, attempts: int) -> None:
+    """Logging progress of attempts every config['log_count'] attempts."""
+    log_count: int = config["log_count"]
+    if config["show_log"] and attempts % log_count == 0:
         print(
             f"{datetime.now().strftime(format='%H:%M:%S')} Process {process_id}: {attempts} total attempts"
         )
 
 
-def find_possible_addresses(address) -> list[str]:
+def address_matches_filters(address: str) -> bool:
     def char_class(ch: str) -> str:
-        chars = LEET_MAP.get(ch.lower())
-        if config["use_leet"] and chars:
+        chars: str | None = LEET_MAP.get(ch.lower())
+        if bool(config["use_leet"]) and chars:
             return f"[{chars}]"
-        if config["register_accuracy"]:
+        if not bool(config["case_sensitive"]):
             return f"[{ch.lower()}{ch.upper()}]"
         return f"[{ch}]"
 
-    included = None
-    if config["is_included"]:
-        pattern: str = "".join(char_class(ch) for ch in str(config["keyword_included"]))
+    included: bool | None = None
+    if bool(config["is_included"]):
+        keyword_included: str = str(config["keyword_included"])
+        pattern: str = "".join(char_class(ch) for ch in keyword_included)
         regex: Pattern[str] = re.compile(pattern)
-        matche: Match[str] | None = regex.search(address)
-        if matche is not None:
+        match: Match[str] | None = regex.search(address)
+        if match is not None:
             included = True
         else:
             included = False
 
-    is_simetric = None
-    if config["is_simetric"]:
+    is_symmetric: bool | None = None
+    if bool(config["is_simetric"]):
+        symmetric_depth: int = int(config["simetric_deep"])
         if has_palindrome_of_depth(
             s=address,
-            depth=config["simetric_deep"],
-            case_sensitive=not config["register_accuracy"],
+            depth=symmetric_depth,
+            case_sensitive=bool(config["case_sensitive"]),
         ):
-            is_simetric = True
+            is_symmetric = True
         else:
-            is_simetric = False
+            is_symmetric = False
 
-    start_with = None
-    if config["start_with"]:
-        if address.startswith(config["start_with"]):
-            start_with = True
+    starts_with: bool | None = None
+    start_prefix: str | None = config.get("start_with")
+    if start_prefix:
+        if address.startswith(start_prefix):
+            starts_with = True
         else:
-            start_with = False
+            starts_with = False
 
-    end_with = None
-    if config["end_with"]:
-        if address.endswith(config["end_with"]):
-            end_with = True
+    ends_with: bool | None = None
+    end_suffix: str | None = config.get("end_with")
+    if end_suffix:
+        if address.endswith(end_suffix):
+            ends_with = True
         else:
-            end_with = False
+            ends_with = False
 
-    return False not in [included, is_simetric, start_with, end_with]
+    return all(x is not False for x in (included, is_symmetric, starts_with, ends_with))
 
 
 def main():
     with multiprocessing.Manager() as manager:
-        stop_event: Event = manager.Event()  # Create a common stop flag
+        stop_event: StopEvent = manager.Event()  # Create a common stop flag
 
         with concurrent.futures.ProcessPoolExecutor(
             max_workers=config["num_processes"]
         ) as executor:
             # Start parallel tasks with passing process number and stop flag
+            num_workers: int = config["num_processes"]
             futures = [
                 executor.submit(iterate, process_id=i + 1, stop_event=stop_event)
-                for i in range(config["num_processes"])
+                for i in range(num_workers)
             ]
 
             for future in concurrent.futures.as_completed(futures):

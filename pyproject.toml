@@ -1,0 +1,10 @@
+[project]
+name = "eth-pretty-address"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "tronpy==0.4.0",
+    "bip-utils==2.10.0",
+]
